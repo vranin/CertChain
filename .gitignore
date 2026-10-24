@@ -1,0 +1,25 @@
+# Dependencies
+node_modules/
+client/node_modules/
+
+# Hardhat
+cache/
+artifacts/
+
+# Contract config (auto-generated on deploy — don't commit)
+config/contract.json
+
+# Build output
+client/dist/
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+npm-debug.log*
