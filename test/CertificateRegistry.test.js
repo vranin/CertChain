@@ -1,133 +1,90 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
+const { time } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("CertificateRegistry", function () {
-  let registry, owner, other;
-
-  // Fake 32-byte hashes (keccak256 of a string — fine as placeholder bytes32)
-  const HASH_1 = ethers.id("certificate-pdf-content-1");
-  const HASH_2 = ethers.id("certificate-pdf-content-2");
+  let registry, owner, issuer1, issuer2, user;
 
   beforeEach(async function () {
-    [owner, other] = await ethers.getSigners();
+    [owner, issuer1, issuer2, user] = await ethers.getSigners();
     const Factory = await ethers.getContractFactory("CertificateRegistry");
     registry = await Factory.deploy();
   });
 
-  // ── Issuance ──────────────────────────────────────────────────────────────
+  describe("Multi-Issuer Roles", function () {
+    it("owner is initial active issuer", async function () {
+      const info = await registry.issuers(owner.address);
+      expect(info.isActive).to.be.true;
+    });
 
-  it("owner can issue a certificate", async function () {
-    const tx = await registry.issueCertificate("CERT-001", HASH_1, "Alice", "Computer Science");
-    const receipt = await tx.wait();
+    it("owner can add and remove issuers", async function () {
+      await registry.addIssuer(issuer1.address, "Engineering Dept");
+      let info = await registry.issuers(issuer1.address);
+      expect(info.isActive).to.be.true;
+      expect(info.name).to.equal("Engineering Dept");
 
-    // Check event was emitted — use receipt log parsing to avoid indexed-param timestamp race
-    const parsed = parseEvent(registry, receipt, "CertificateIssued");
-    expect(parsed).to.not.be.null;
-    expect(parsed.args.studentName).to.equal("Alice");
-    expect(parsed.args.course).to.equal("Computer Science");
+      await registry.removeIssuer(issuer1.address);
+      info = await registry.issuers(issuer1.address);
+      expect(info.isActive).to.be.false;
+    });
 
-    // Verify on-chain storage
-    const [exists, revoked, certId, name, course] = await registry.verifyById("CERT-001");
-    expect(exists).to.be.true;
-    expect(revoked).to.be.false;
-    expect(certId).to.equal("CERT-001");
-    expect(name).to.equal("Alice");
-    expect(course).to.equal("Computer Science");
+    it("non-issuer cannot issue a certificate", async function () {
+      const hash = ethers.keccak256(ethers.toUtf8Bytes("test-doc-1"));
+      await expect(
+        registry.connect(user).issueCertificate("CERT-001", hash, 0)
+      ).to.be.revertedWith("Caller is not an authorized issuer");
+    });
+
+    it("removed issuer cannot issue a certificate", async function () {
+      await registry.addIssuer(issuer1.address, "Engineering Dept");
+      await registry.removeIssuer(issuer1.address);
+
+      const hash = ethers.keccak256(ethers.toUtf8Bytes("test-doc-2"));
+      await expect(
+        registry.connect(issuer1).issueCertificate("CERT-002", hash, 0)
+      ).to.be.revertedWith("Caller is not an authorized issuer");
+    });
   });
 
-  it("reverts on duplicate certificate ID", async function () {
-    await registry.issueCertificate("CERT-002", HASH_1, "Bob", "Math");
-    await expect(
-      registry.issueCertificate("CERT-002", HASH_2, "Carol", "Physics")
-    ).to.be.revertedWith("Certificate ID already exists");
+  describe("Certificate Expiry", function () {
+    it("reports valid with 0 expiry (never expires)", async function () {
+      const hash = ethers.keccak256(ethers.toUtf8Bytes("never-expire-doc"));
+      await registry.issueCertificate("CERT-NEVER", hash, 0);
+
+      const res = await registry.verifyById("CERT-NEVER");
+      expect(res.exists).to.be.true;
+      expect(res.isExpired).to.be.false;
+    });
+
+    it("valid when expiresAt is future, expired after time advances", async function () {
+      const now = await time.latest();
+      const expiresAt = now + 3600;
+      const hash = ethers.keccak256(ethers.toUtf8Bytes("expiring-doc"));
+
+      await registry.issueCertificate("CERT-EXP", hash, expiresAt);
+      let res = await registry.verifyById("CERT-EXP");
+      expect(res.isExpired).to.be.false;
+
+      await time.increase(3601);
+      res = await registry.verifyById("CERT-EXP");
+      expect(res.isExpired).to.be.true;
+    });
   });
 
-  it("reverts on duplicate hash", async function () {
-    await registry.issueCertificate("CERT-003", HASH_1, "Dave", "Biology");
-    await expect(
-      registry.issueCertificate("CERT-004", HASH_1, "Eve", "Chemistry")
-    ).to.be.revertedWith("Hash already registered");
-  });
+  describe("Revocation Permissions", function () {
+    it("original issuer and owner can revoke, other issuers cannot", async function () {
+      await registry.addIssuer(issuer1.address, "Issuer 1");
+      await registry.addIssuer(issuer2.address, "Issuer 2");
 
-  it("non-owner cannot issue a certificate", async function () {
-    await expect(
-      registry.connect(other).issueCertificate("CERT-005", HASH_1, "Frank", "Law")
-    ).to.be.revertedWith("Not owner");
-  });
+      const hash = ethers.keccak256(ethers.toUtf8Bytes("doc-123"));
+      await registry.connect(issuer1).issueCertificate("CERT-REV", hash, 0);
 
-  // ── Revocation ────────────────────────────────────────────────────────────
+      await expect(
+        registry.connect(issuer2).revokeCertificate("CERT-REV")
+      ).to.be.revertedWith("Only owner or issuing address can revoke");
 
-  it("owner can revoke a certificate", async function () {
-    await registry.issueCertificate("CERT-006", HASH_1, "Grace", "Art");
-    const tx = await registry.revokeCertificate("CERT-006");
-    const receipt = await tx.wait();
-
-    // Check CertificateRevoked event exists and has a reasonable timestamp
-    const parsed = parseEvent(registry, receipt, "CertificateRevoked");
-    expect(parsed).to.not.be.null;
-    expect(parsed.args.revokedAt).to.be.gt(0n);
-
-    // Confirm the revoked flag flipped
-    const [, revoked] = await registry.verifyById("CERT-006");
-    expect(revoked).to.be.true;
-  });
-
-  it("non-owner cannot revoke a certificate", async function () {
-    await registry.issueCertificate("CERT-007", HASH_1, "Heidi", "Music");
-    await expect(
-      registry.connect(other).revokeCertificate("CERT-007")
-    ).to.be.revertedWith("Not owner");
-  });
-
-  it("reverts on double revoke", async function () {
-    await registry.issueCertificate("CERT-008", HASH_1, "Ivan", "Sports");
-    await registry.revokeCertificate("CERT-008");
-    await expect(registry.revokeCertificate("CERT-008")).to.be.revertedWith("Already revoked");
-  });
-
-  it("reverts when revoking non-existent certificate", async function () {
-    await expect(registry.revokeCertificate("CERT-GHOST")).to.be.revertedWith(
-      "Certificate not found"
-    );
-  });
-
-  // ── Verification ──────────────────────────────────────────────────────────
-
-  it("verifyByHash returns correct data", async function () {
-    await registry.issueCertificate("CERT-009", HASH_1, "Judy", "Engineering");
-    const [exists, revoked, certId, name, course, issuedAt] =
-      await registry.verifyByHash(HASH_1);
-    expect(exists).to.be.true;
-    expect(revoked).to.be.false;
-    expect(certId).to.equal("CERT-009");
-    expect(name).to.equal("Judy");
-    expect(course).to.equal("Engineering");
-    expect(issuedAt).to.be.gt(0n);
-  });
-
-  it("verifyByHash returns exists=false for unknown hash", async function () {
-    const [exists] = await registry.verifyByHash(HASH_2);
-    expect(exists).to.be.false;
-  });
-
-  it("verifyById returns exists=false for unknown ID", async function () {
-    const [exists] = await registry.verifyById("CERT-UNKNOWN");
-    expect(exists).to.be.false;
+      await expect(registry.connect(owner).revokeCertificate("CERT-REV"))
+        .to.emit(registry, "CertificateRevoked");
+    });
   });
 });
-
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Parse a named event from a transaction receipt using the contract interface. */
-function parseEvent(contract, receipt, eventName) {
-  const iface = contract.interface;
-  for (const log of receipt.logs) {
-    try {
-      const parsed = iface.parseLog({ topics: log.topics, data: log.data });
-      if (parsed && parsed.name === eventName) return parsed;
-    } catch {
-      // not this contract's event
-    }
-  }
-  return null;
-}

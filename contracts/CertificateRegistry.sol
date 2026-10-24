@@ -1,132 +1,187 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-/// @title CertificateRegistry
-/// @notice Stores and verifies SHA-256 hashes of issued certificates on-chain.
-/// @dev Only the deployer (owner) can issue or revoke certificates.
 contract CertificateRegistry {
     address public owner;
 
-    /// @notice Data stored on-chain for each certificate.
     struct Certificate {
-        bytes32 hash;        // SHA-256 hash of the PDF
-        string studentName;
-        string course;
-        uint256 issuedAt;    // Unix timestamp
-        bool revoked;
-        bool exists;         // sentinel flag to distinguish missing from zero-value
+        string certId;
+        bytes32 docHash;
+        address issuer;
+        uint256 issuedAt;
+        uint256 expiresAt;
+        bool isRevoked;
     }
 
-    /// @dev Primary index: certId -> Certificate
-    mapping(string => Certificate) private _certs;
+    struct IssuerInfo {
+        bool isActive;
+        string name;
+    }
 
-    /// @dev Reverse index: hash -> certId (prevents duplicate PDFs)
-    mapping(bytes32 => string) private _hashToCertId;
-
-    // ─── Events ────────────────────────────────────────────────────────────────
+    mapping(bytes32 => Certificate) private certificatesByHash;
+    mapping(string => bytes32) private certIdToHash;
+    mapping(address => IssuerInfo) public issuers;
+    address[] public issuerAddresses;
 
     event CertificateIssued(
         string indexed certId,
-        bytes32 indexed hash,
-        string studentName,
-        string course,
-        uint256 issuedAt
+        bytes32 indexed docHash,
+        address indexed issuer,
+        uint256 issuedAt,
+        uint256 expiresAt
     );
 
-    event CertificateRevoked(string indexed certId, uint256 revokedAt);
+    event CertificateRevoked(
+        string indexed certId,
+        bytes32 indexed docHash,
+        address indexed revokedBy,
+        uint256 revokedAt
+    );
 
-    // ─── Modifiers ─────────────────────────────────────────────────────────────
+    event IssuerAdded(address indexed issuerAddress, string name, address addedBy);
+    event IssuerRemoved(address indexed issuerAddress, address removedBy);
 
     modifier onlyOwner() {
-        require(msg.sender == owner, "Not owner");
+        require(msg.sender == owner, "Only owner can call this");
         _;
     }
 
-    // ─── Constructor ───────────────────────────────────────────────────────────
+    modifier onlyIssuer() {
+        require(issuers[msg.sender].isActive, "Caller is not an authorized issuer");
+        _;
+    }
 
     constructor() {
         owner = msg.sender;
+        issuers[msg.sender] = IssuerInfo(true, "Root Admin Issuer");
+        issuerAddresses.push(msg.sender);
+        emit IssuerAdded(msg.sender, "Root Admin Issuer", msg.sender);
     }
 
-    // ─── Write functions ───────────────────────────────────────────────────────
+    function addIssuer(address _issuer, string calldata _name) external onlyOwner {
+        require(_issuer != address(0), "Invalid address");
+        require(!issuers[_issuer].isActive, "Issuer already active");
 
-    /// @notice Issue a new certificate. Reverts on duplicate ID or duplicate hash.
-    /// @param certId  Unique certificate identifier (e.g. "CERT-1714000000000")
-    /// @param hash    SHA-256 hash of the certificate PDF
-    /// @param studentName  Full name of the recipient
-    /// @param course  Name of the course / qualification
+        if (bytes(issuers[_issuer].name).length == 0) {
+            issuerAddresses.push(_issuer);
+        }
+        issuers[_issuer] = IssuerInfo(true, _name);
+        emit IssuerAdded(_issuer, _name, msg.sender);
+    }
+
+    function removeIssuer(address _issuer) external onlyOwner {
+        require(issuers[_issuer].isActive, "Not an active issuer");
+        require(_issuer != owner, "Cannot remove contract owner");
+
+        issuers[_issuer].isActive = false;
+        emit IssuerRemoved(_issuer, msg.sender);
+    }
+
+    function getAllIssuers() external view returns (address[] memory addrs, string[] memory names, bool[] memory statuses) {
+        uint256 len = issuerAddresses.length;
+        addrs = new address[](len);
+        names = new string[](len);
+        statuses = new bool[](len);
+
+        for (uint256 i = 0; i < len; i++) {
+            address addr = issuerAddresses[i];
+            addrs[i] = addr;
+            names[i] = issuers[addr].name;
+            statuses[i] = issuers[addr].isActive;
+        }
+        return (addrs, names, statuses);
+    }
+
     function issueCertificate(
-        string calldata certId,
-        bytes32 hash,
-        string calldata studentName,
-        string calldata course
-    ) external onlyOwner {
-        require(!_certs[certId].exists, "Certificate ID already exists");
-        require(bytes(_hashToCertId[hash]).length == 0, "Hash already registered");
+        string calldata _certId,
+        bytes32 _docHash,
+        uint256 _expiresAt
+    ) external onlyIssuer {
+        require(bytes(_certId).length > 0, "certId required");
+        require(_docHash != bytes32(0), "docHash required");
+        require(certIdToHash[_certId] == bytes32(0), "certId already exists");
+        require(certificatesByHash[_docHash].docHash == bytes32(0), "docHash already registered");
 
-        _certs[certId] = Certificate({
-            hash: hash,
-            studentName: studentName,
-            course: course,
+        certificatesByHash[_docHash] = Certificate({
+            certId: _certId,
+            docHash: _docHash,
+            issuer: msg.sender,
             issuedAt: block.timestamp,
-            revoked: false,
-            exists: true
+            expiresAt: _expiresAt,
+            isRevoked: false
         });
-        _hashToCertId[hash] = certId;
 
-        emit CertificateIssued(certId, hash, studentName, course, block.timestamp);
+        certIdToHash[_certId] = _docHash;
+
+        emit CertificateIssued(_certId, _docHash, msg.sender, block.timestamp, _expiresAt);
     }
 
-    /// @notice Revoke a certificate. Reverts if not found or already revoked.
-    /// @param certId  The certificate to revoke
-    function revokeCertificate(string calldata certId) external onlyOwner {
-        require(_certs[certId].exists, "Certificate not found");
-        require(!_certs[certId].revoked, "Already revoked");
+    function revokeCertificate(string calldata _certId) external {
+        bytes32 docHash = certIdToHash[_certId];
+        require(docHash != bytes32(0), "Certificate not found");
+        Certificate storage cert = certificatesByHash[docHash];
+        require(!cert.isRevoked, "Already revoked");
+        require(msg.sender == owner || msg.sender == cert.issuer, "Only owner or issuing address can revoke");
 
-        _certs[certId].revoked = true;
-        emit CertificateRevoked(certId, block.timestamp);
+        cert.isRevoked = true;
+
+        emit CertificateRevoked(_certId, docHash, msg.sender, block.timestamp);
     }
 
-    // ─── Read functions ────────────────────────────────────────────────────────
-
-    /// @notice Look up a certificate by its PDF hash.
-    function verifyByHash(bytes32 hash)
-        external
-        view
-        returns (
-            bool exists,
-            bool revoked,
-            string memory certId,
-            string memory studentName,
-            string memory course,
-            uint256 issuedAt
-        )
-    {
-        certId = _hashToCertId[hash];
-        if (bytes(certId).length == 0) {
-            return (false, false, "", "", "", 0);
+    function verifyByHash(bytes32 _docHash) external view returns (
+        bool exists,
+        string memory certId,
+        address issuer,
+        string memory issuerName,
+        uint256 issuedAt,
+        uint256 expiresAt,
+        bool isRevoked,
+        bool isExpired
+    ) {
+        Certificate memory cert = certificatesByHash[_docHash];
+        if (cert.docHash == bytes32(0)) {
+            return (false, "", address(0), "", 0, 0, false, false);
         }
-        Certificate storage cert = _certs[certId];
-        return (cert.exists, cert.revoked, certId, cert.studentName, cert.course, cert.issuedAt);
+
+        bool expired = (cert.expiresAt != 0 && block.timestamp > cert.expiresAt);
+        return (
+            true,
+            cert.certId,
+            cert.issuer,
+            issuers[cert.issuer].name,
+            cert.issuedAt,
+            cert.expiresAt,
+            cert.isRevoked,
+            expired
+        );
     }
 
-    /// @notice Look up a certificate by its ID.
-    function verifyById(string calldata certId)
-        external
-        view
-        returns (
-            bool exists,
-            bool revoked,
-            string memory id,
-            string memory studentName,
-            string memory course,
-            uint256 issuedAt
-        )
-    {
-        Certificate storage cert = _certs[certId];
-        if (!cert.exists) {
-            return (false, false, certId, "", "", 0);
+    function verifyById(string calldata _certId) external view returns (
+        bool exists,
+        bytes32 docHash,
+        address issuer,
+        string memory issuerName,
+        uint256 issuedAt,
+        uint256 expiresAt,
+        bool isRevoked,
+        bool isExpired
+    ) {
+        bytes32 hash = certIdToHash[_certId];
+        if (hash == bytes32(0)) {
+            return (false, bytes32(0), address(0), "", 0, 0, false, false);
         }
-        return (cert.exists, cert.revoked, certId, cert.studentName, cert.course, cert.issuedAt);
+
+        Certificate memory cert = certificatesByHash[hash];
+        bool expired = (cert.expiresAt != 0 && block.timestamp > cert.expiresAt);
+        return (
+            true,
+            cert.docHash,
+            cert.issuer,
+            issuers[cert.issuer].name,
+            cert.issuedAt,
+            cert.expiresAt,
+            cert.isRevoked,
+            expired
+        );
     }
 }
