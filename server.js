@@ -1,420 +1,313 @@
-/**
- * server.js
- * Express API server for the Blockchain Certificate Verification System.
- *
- * Run order:
- *   1. npx hardhat node           (terminal 1)
- *   2. npm run compile && npm run deploy && npm start   (terminal 2)
- */
-
-"use strict";
-
 const express = require("express");
-const multer = require("multer");
-const crypto = require("crypto");
+const cors = require("cors");
+const dotenv = require("dotenv");
 const fs = require("fs");
 const path = require("path");
-const { ethers } = require("ethers");
-const PDFDocument = require("pdfkit");
+const crypto = require("crypto");
+const multer = require("multer");
 const QRCode = require("qrcode");
+const { PDFDocument } = require("pdf-lib");
+const { ethers } = require("ethers");
 
-// ─── Config ──────────────────────────────────────────────────────────────────
-
-const PORT = process.env.PORT || 3000;
-const CHAIN_URL = "http://127.0.0.1:8545";
-
-// Well-known Hardhat account #0 private key (safe for local dev only)
-const ISSUER_PRIVATE_KEY =
-  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
-
-// Load deployed contract config (written by scripts/deploy.js)
-const CONTRACT_CONFIG_PATH = path.join(__dirname, "config", "contract.json");
-
-function loadContractConfig() {
-  if (!fs.existsSync(CONTRACT_CONFIG_PATH)) {
-    console.error(
-      "ERROR: config/contract.json not found. Run `npm run deploy` first."
-    );
-    process.exit(1);
-  }
-  return JSON.parse(fs.readFileSync(CONTRACT_CONFIG_PATH, "utf8"));
-}
-
-const { address: CONTRACT_ADDRESS, abi: CONTRACT_ABI } = loadContractConfig();
-
-// ─── Ethers setup ─────────────────────────────────────────────────────────────
-
-const provider = new ethers.JsonRpcProvider(CHAIN_URL);
-const signer = new ethers.Wallet(ISSUER_PRIVATE_KEY, provider);
-const contract = new ethers.Contract(CONTRACT_ADDRESS, CONTRACT_ABI, signer);
-const contractReader = contract.connect(provider); // read-only for non-signed calls
-
-// ─── Express setup ────────────────────────────────────────────────────────────
+dotenv.config();
 
 const app = express();
+const PORT = process.env.PORT || 5000;
+
+app.use(cors());
 app.use(express.json());
 
-// Multer – store uploads in memory so we can hash the exact bytes received
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+// ---------------------------------------------------------------------------
+// 1. Data Directories & Activity Log Persistence
+// ---------------------------------------------------------------------------
+const DATA_DIR = path.resolve("data");
+const LOGS_FILE = path.join(DATA_DIR, "activity-logs.json");
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/**
- * Compute SHA-256 of a Buffer and return it as a 0x-prefixed hex bytes32.
- */
-function sha256Bytes32(buf) {
-  const hex = crypto.createHash("sha256").update(buf).digest("hex");
-  return "0x" + hex;
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
-/**
- * Generate a certificate PDF and return the raw Buffer.
- * The QR code encodes the verify URL so verifiers can scan and check.
- */
-async function generateCertificatePDF({ certId, studentName, course, issuedAt }) {
-  const verifyUrl = `http://localhost:${PORT}/verify?id=${certId}`;
+if (!fs.existsSync(LOGS_FILE)) {
+  fs.writeFileSync(LOGS_FILE, JSON.stringify([], null, 2), "utf8");
+}
 
-  // Generate QR code as a PNG buffer
-  const qrBuffer = await QRCode.toBuffer(verifyUrl, {
+function logActivity(action, details = {}) {
+  try {
+    const raw = fs.readFileSync(LOGS_FILE, "utf8");
+    const logs = JSON.parse(raw || "[]");
+    const entry = {
+      id: crypto.randomUUID(),
+      action,
+      timestamp: new Date().toISOString(),
+      ...details,
+    };
+    logs.unshift(entry);
+    fs.writeFileSync(LOGS_FILE, JSON.stringify(logs.slice(0, 500), null, 2), "utf8");
+    return entry;
+  } catch (err) {
+    console.error("Failed to write activity log:", err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 2. Blockchain / Contract Setup (Ethers v6)
+// ---------------------------------------------------------------------------
+const RPC_URL = process.env.RPC_URL || "http://127.0.0.1:8545";
+const PRIVATE_KEY = process.env.PRIVATE_KEY;
+const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+
+let registryContract = null;
+let provider = null;
+let signer = null;
+
+try {
+  const artifactPath = path.resolve(
+    "artifacts/contracts/CertificateRegistry.sol/CertificateRegistry.json"
+  );
+  if (fs.existsSync(artifactPath) && CONTRACT_ADDRESS && PRIVATE_KEY) {
+    const artifact = JSON.parse(fs.readFileSync(artifactPath, "utf8"));
+    provider = new ethers.JsonRpcProvider(RPC_URL);
+    signer = new ethers.Wallet(PRIVATE_KEY, provider);
+    registryContract = new ethers.Contract(CONTRACT_ADDRESS, artifact.abi, signer);
+    console.log("Connected to CertificateRegistry at:", CONTRACT_ADDRESS);
+  } else {
+    console.warn("Notice: Contract details or env variables not configured yet. Running in offline mode.");
+  }
+} catch (error) {
+  console.warn("Could not load contract artifact:", error.message);
+}
+
+// ---------------------------------------------------------------------------
+// 3. Helper: QR Code Stamping on PDF
+// ---------------------------------------------------------------------------
+async function stampQRCodeOnPDF(pdfBuffer, verifyUrl) {
+  const qrImageBuffer = await QRCode.toBuffer(verifyUrl, {
     width: 120,
     margin: 1,
-    color: { dark: "#0f172a", light: "#ffffff" },
+    color: {
+      dark: "#000000",
+      light: "#FFFFFF",
+    },
   });
 
-  return new Promise((resolve, reject) => {
-    const doc = new PDFDocument({
-      size: "A4",
-      margin: 60,
-      info: { Title: "Certificate of Completion", Author: "CertChain Institute" },
-    });
+  const pdfDoc = await PDFDocument.load(pdfBuffer);
+  const qrImage = await pdfDoc.embedPng(qrImageBuffer);
 
-    const chunks = [];
-    doc.on("data", (chunk) => chunks.push(chunk));
-    doc.on("end", () => resolve(Buffer.concat(chunks)));
-    doc.on("error", reject);
+  const pages = pdfDoc.getPages();
+  const firstPage = pages[0];
+  const { width } = firstPage.getSize();
 
-    const W = doc.page.width;
-    const H = doc.page.height;
-    const M = 48; // margin
+  const qrSize = 75;
+  const margin = 25;
 
-    // ── Outer border ──────────────────────────────────────────────────────────
-    doc
-      .rect(M, M, W - M * 2, H - M * 2)
-      .lineWidth(3)
-      .strokeColor("#0f172a")
-      .stroke();
-
-    doc
-      .rect(M + 6, M + 6, W - (M + 6) * 2, H - (M + 6) * 2)
-      .lineWidth(1)
-      .strokeColor("#475569")
-      .stroke();
-
-    // ── Header band ───────────────────────────────────────────────────────────
-    doc.rect(M, M, W - M * 2, 80).fillColor("#0f172a").fill();
-
-    doc
-      .fillColor("#10b981")
-      .fontSize(11)
-      .font("Helvetica-Bold")
-      .text("CertChain Institute", M + 20, M + 14, { width: W - M * 2 - 40, align: "center" });
-
-    doc
-      .fillColor("#f8fafc")
-      .fontSize(22)
-      .text("CERTIFICATE OF COMPLETION", M + 20, M + 34, {
-        width: W - M * 2 - 40,
-        align: "center",
-      });
-
-    // ── Body ──────────────────────────────────────────────────────────────────
-    let y = M + 110;
-
-    doc
-      .fillColor("#475569")
-      .fontSize(12)
-      .font("Helvetica")
-      .text("This is to certify that", 0, y, { align: "center" });
-
-    y += 32;
-    doc
-      .fillColor("#0f172a")
-      .fontSize(32)
-      .font("Helvetica-Bold")
-      .text(studentName, 0, y, { align: "center" });
-
-    // Decorative line under name
-    const lineY = y + 46;
-    doc
-      .moveTo(W / 2 - 120, lineY)
-      .lineTo(W / 2 + 120, lineY)
-      .lineWidth(1.5)
-      .strokeColor("#10b981")
-      .stroke();
-
-    y = lineY + 20;
-    doc
-      .fillColor("#475569")
-      .fontSize(12)
-      .font("Helvetica")
-      .text("has successfully completed the course", 0, y, { align: "center" });
-
-    y += 28;
-    doc
-      .fillColor("#0f172a")
-      .fontSize(20)
-      .font("Helvetica-Bold")
-      .text(course, 0, y, { align: "center" });
-
-    y += 40;
-    const dateStr = new Date(issuedAt).toLocaleDateString("en-US", {
-      year: "numeric",
-      month: "long",
-      day: "numeric",
-    });
-    doc
-      .fillColor("#64748b")
-      .fontSize(11)
-      .font("Helvetica")
-      .text(`Date of Issue: ${dateStr}`, 0, y, { align: "center" });
-
-    // ── Issuer signature ──────────────────────────────────────────────────────
-    y += 80;
-    const sigX = W / 2 - 80;
-    doc
-      .moveTo(sigX, y)
-      .lineTo(sigX + 160, y)
-      .lineWidth(1)
-      .strokeColor("#94a3b8")
-      .stroke();
-
-    doc
-      .fillColor("#475569")
-      .fontSize(10)
-      .text("Authorized Signatory", 0, y + 6, { align: "center" });
-
-    doc
-      .fillColor("#10b981")
-      .fontSize(10)
-      .font("Helvetica-Bold")
-      .text("CertChain Institute", 0, y + 20, { align: "center" });
-
-    // ── QR code (bottom-right) ────────────────────────────────────────────────
-    const qrSize = 90;
-    const qrX = W - M - qrSize - 20;
-    const qrY = H - M - qrSize - 40;
-    doc.image(qrBuffer, qrX, qrY, { width: qrSize, height: qrSize });
-    doc
-      .fillColor("#94a3b8")
-      .fontSize(7)
-      .font("Helvetica")
-      .text("Scan to verify", qrX, qrY + qrSize + 2, { width: qrSize, align: "center" });
-
-    // ── Certificate ID (bottom strip) ─────────────────────────────────────────
-    const stripY = H - M - 28;
-    doc
-      .rect(M, stripY, W - M * 2, 28)
-      .fillColor("#f1f5f9")
-      .fill();
-
-    doc
-      .fillColor("#64748b")
-      .fontSize(8)
-      .font("Helvetica")
-      .text(`Certificate ID: ${certId}`, M + 10, stripY + 9, {
-        width: W - M * 2 - 20,
-        align: "left",
-      });
-
-    doc
-      .fillColor("#94a3b8")
-      .fontSize(8)
-      .text("Verify at: certchain.local", M + 10, stripY + 9, {
-        width: W - M * 2 - 20,
-        align: "right",
-      });
-
-    doc.end();
+  firstPage.drawImage(qrImage, {
+    x: width - qrSize - margin,
+    y: margin,
+    width: qrSize,
+    height: qrSize,
   });
+
+  return await pdfDoc.save();
 }
 
-// ─── Routes ───────────────────────────────────────────────────────────────────
+const upload = multer({ limits: { fileSize: 10 * 1024 * 1024 } });
 
-/**
- * POST /api/issue
- * Multipart form: fields studentName + course, file field "certificate" (PDF).
- *
- * The issuer uploads an existing certificate PDF they already have.
- * The server hashes it and registers the hash on-chain.
- * The same PDF can later be uploaded on the verify page to confirm authenticity.
- */
-app.post("/api/issue", upload.single("certificate"), async (req, res) => {
+// ---------------------------------------------------------------------------
+// 4. API Endpoints
+// ---------------------------------------------------------------------------
+
+// Audit / Activity Log
+app.get("/api/logs", (req, res) => {
   try {
-    const { studentName, course } = req.body;
-    if (!studentName || !course) {
-      return res.status(400).json({ error: "studentName and course are required" });
+    const raw = fs.readFileSync(LOGS_FILE, "utf8");
+    const logs = JSON.parse(raw || "[]");
+    return res.json({ success: true, logs });
+  } catch (err) {
+    return res.status(500).json({ error: "Failed to retrieve logs" });
+  }
+});
+
+// Multi-Issuer: Get All Issuers
+app.get("/api/issuers", async (req, res) => {
+  try {
+    if (!registryContract) {
+      return res.status(503).json({ error: "Blockchain contract not connected." });
+    }
+    const [addrs, names, statuses] = await registryContract.getAllIssuers();
+    const issuers = addrs.map((addr, idx) => ({
+      address: addr,
+      name: names[idx],
+      isActive: statuses[idx],
+    }));
+    return res.json({ success: true, issuers });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Multi-Issuer: Add Issuer
+app.post("/api/issuers/add", async (req, res) => {
+  try {
+    const { issuerAddress, name } = req.body;
+    if (!issuerAddress || !name) {
+      return res.status(400).json({ error: "issuerAddress and name required" });
+    }
+    if (!registryContract) {
+      return res.status(503).json({ error: "Blockchain contract not connected." });
+    }
+
+    const tx = await registryContract.addIssuer(issuerAddress, name);
+    await tx.wait();
+
+    logActivity("ISSUER_ADDED", {
+      issuerAddress,
+      issuerName: name,
+      addedBy: await signer.getAddress(),
+      txHash: tx.hash,
+    });
+
+    return res.json({ success: true, txHash: tx.hash });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Multi-Issuer: Remove Issuer
+app.post("/api/issuers/remove", async (req, res) => {
+  try {
+    const { issuerAddress } = req.body;
+    if (!issuerAddress) {
+      return res.status(400).json({ error: "issuerAddress required" });
+    }
+    if (!registryContract) {
+      return res.status(503).json({ error: "Blockchain contract not connected." });
+    }
+
+    const tx = await registryContract.removeIssuer(issuerAddress);
+    await tx.wait();
+
+    logActivity("ISSUER_REMOVED", {
+      issuerAddress,
+      removedBy: await signer.getAddress(),
+      txHash: tx.hash,
+    });
+
+    return res.json({ success: true, txHash: tx.hash });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// Certificate Issuance (QR Stamping + Expiry)
+app.post("/api/issue", upload.single("file"), async (req, res) => {
+  try {
+    const { certId, recipientName, courseName, expiresAt } = req.body;
+
+    if (!certId) {
+      return res.status(400).json({ error: "certId is required" });
     }
     if (!req.file) {
-      return res.status(400).json({ error: "A certificate PDF file is required" });
+      return res.status(400).json({ error: "Certificate PDF file is required" });
     }
 
-    const certId = `CERT-${Date.now()}`;
+    const expirationTimestamp = expiresAt ? Math.floor(new Date(expiresAt).getTime() / 1000) : 0;
 
-    // 1. Hash the uploaded PDF bytes exactly as received
-    const pdfBuffer = req.file.buffer;
-    const hashHex = sha256Bytes32(pdfBuffer);
+    const clientBaseUrl = process.env.CLIENT_URL || "http://localhost:5173";
+    const verificationUrl = `${clientBaseUrl}/verify?id=${encodeURIComponent(certId)}`;
 
-    // 2. Register the hash on-chain
-    const tx = await contract.issueCertificate(certId, hashHex, studentName, course);
-    const receipt = await tx.wait();
+    const stampedPdfBytes = await stampQRCodeOnPDF(req.file.buffer, verificationUrl);
 
-    // 3. Return metadata — the issuer keeps the original PDF
-    res.json({
-      certId,
-      txHash: receipt.hash,
-      hash: hashHex,
-      fileName: req.file.originalname,
-    });
-  } catch (err) {
-    console.error("Issue error:", err);
-    res.status(500).json({ error: err.message || "Failed to issue certificate" });
-  }
-});
+    const docHashBytes = crypto.createHash("sha256").update(Buffer.from(stampedPdfBytes)).digest();
+    const docHash = ethers.hexlify(docHashBytes);
 
-/**
- * POST /api/verify-file
- * Multipart: field name "certificate" -> PDF file.
- * Hashes the uploaded file and queries the chain by hash.
- */
-app.post("/api/verify-file", upload.single("certificate"), async (req, res) => {
-  try {
-    if (!req.file) {
-      return res.status(400).json({ error: "No file uploaded" });
+    let txHash = null;
+    if (registryContract) {
+      const tx = await registryContract.issueCertificate(certId, docHash, expirationTimestamp);
+      await tx.wait();
+      txHash = tx.hash;
     }
 
-    const hashHex = sha256Bytes32(req.file.buffer);
-    const [exists, revoked, certId, studentName, course, issuedAt] =
-      await contractReader.verifyByHash(hashHex);
-
-    res.json({
-      hash: hashHex,
-      exists,
-      revoked,
+    const currentSignerAddr = signer ? await signer.getAddress() : "0x0000000000000000000000000000000000000000";
+    logActivity("CERTIFICATE_ISSUED", {
       certId,
-      studentName,
-      course,
-      issuedAt: exists ? Number(issuedAt) * 1000 : null, // convert to ms
+      recipientName: recipientName || "N/A",
+      courseName: courseName || "N/A",
+      docHash,
+      issuer: currentSignerAddr,
+      expiresAt: expirationTimestamp,
+      txHash,
+    });
+
+    return res.json({
+      success: true,
+      certId,
+      docHash,
+      expiresAt: expirationTimestamp,
+      txHash,
+      pdfBase64: Buffer.from(stampedPdfBytes).toString("base64"),
     });
   } catch (err) {
-    console.error("Verify-file error:", err);
-    res.status(500).json({ error: err.message });
+    console.error("Issuance failed:", err);
+    return res.status(500).json({ error: err.message });
   }
 });
 
-/**
- * GET /api/verify-id/:id
- * Looks up a certificate by its ID.
- */
-app.get("/api/verify-id/:id", async (req, res) => {
-  try {
-    const certId = req.params.id;
-    const [exists, revoked, id, studentName, course, issuedAt] =
-      await contractReader.verifyById(certId);
-
-    res.json({
-      exists,
-      revoked,
-      certId: id,
-      studentName,
-      course,
-      issuedAt: exists ? Number(issuedAt) * 1000 : null,
-    });
-  } catch (err) {
-    console.error("Verify-id error:", err);
-    res.status(500).json({ error: err.message });
-  }
-});
-
-/**
- * POST /api/revoke
- * Body: { certId: string }
- * Revokes a certificate on-chain.
- */
+// Certificate Revocation
 app.post("/api/revoke", async (req, res) => {
   try {
-    const { certId } = req.body;
-    if (!certId) return res.status(400).json({ error: "certId is required" });
+    const { certId, reason } = req.body;
+    if (!certId) {
+      return res.status(400).json({ error: "certId required" });
+    }
+    if (!registryContract) {
+      return res.status(503).json({ error: "Blockchain contract not connected." });
+    }
 
-    const tx = await contract.revokeCertificate(certId);
-    const receipt = await tx.wait();
+    const tx = await registryContract.revokeCertificate(certId);
+    await tx.wait();
 
-    res.json({ success: true, certId, txHash: receipt.hash });
+    const caller = await signer.getAddress();
+    logActivity("CERTIFICATE_REVOKED", {
+      certId,
+      reason: reason || "Revoked by issuer",
+      revokedBy: caller,
+      txHash: tx.hash,
+    });
+
+    return res.json({ success: true, txHash: tx.hash });
   } catch (err) {
-    console.error("Revoke error:", err);
-    res.status(500).json({ error: err.reason || err.message || "Revoke failed" });
+    return res.status(500).json({ error: err.message });
   }
 });
 
-/**
- * GET /api/certificates
- * Returns all issued certificates (from CertificateIssued events) with revoke status.
- *
- * NOTE: certId is indexed in the event, so `e.args.certId` comes back as a topic hash.
- * We use the non-indexed `studentName` and `course` args directly, and recover the
- * certId by calling verifyByHash using the non-indexed `hash` arg.
- */
-app.get("/api/certificates", async (req, res) => {
+// Verification Route
+app.get("/api/verify/:certId", async (req, res) => {
   try {
-    // Query CertificateIssued events from block 0
-    const issuedFilter = contract.filters.CertificateIssued();
-    const issuedEvents = await contract.queryFilter(issuedFilter, 0, "latest");
+    const { certId } = req.params;
+    if (!registryContract) {
+      return res.status(503).json({ error: "Blockchain contract not connected." });
+    }
 
-    // For each issued event, recover the certId via verifyByHash (hash IS non-indexed)
-    const certificates = await Promise.all(
-      issuedEvents.map(async (e) => {
-        const block = await e.getBlock();
-        const hash = e.args.hash; // non-indexed bytes32 — readable directly
+    const result = await registryContract.verifyById(certId);
+    const [exists, docHash, issuer, issuerName, issuedAt, expiresAt, isRevoked, isExpired] = result;
 
-        // verifyByHash gives us the real certId string
-        const [, revoked, certId] = await contractReader.verifyByHash(hash);
-
-        return {
-          certId,
-          studentName: e.args.studentName,
-          course: e.args.course,
-          issuedAt: block.timestamp * 1000,
-          revoked,
-        };
-      })
-    );
-
-    const revokedCount = certificates.filter((c) => c.revoked).length;
-    res.json({ certificates, total: certificates.length, revoked: revokedCount });
+    return res.json({
+      success: true,
+      exists,
+      docHash,
+      issuer,
+      issuerName,
+      issuedAt: Number(issuedAt),
+      expiresAt: Number(expiresAt),
+      isRevoked,
+      isExpired,
+    });
   } catch (err) {
-    console.error("Certificates list error:", err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 });
 
-// ─── Static file serving (production build) ───────────────────────────────────
-
-const clientDist = path.join(__dirname, "client", "dist");
-if (fs.existsSync(clientDist)) {
-  app.use(express.static(clientDist));
-  // Return index.html for any non-/api route so React Router can handle it
-  app.get(/^(?!\/api).*$/, (req, res) => {
-    res.sendFile(path.join(clientDist, "index.html"));
-  });
-} else {
-  app.get("/", (req, res) =>
-    res.json({ message: "API running. Build the client with `npm run build:client`." })
-  );
-}
-
-// ─── Start ───────────────────────────────────────────────────────────────────
-
+// Start Server
 app.listen(PORT, () => {
-  console.log(`\nCertChain server running at http://localhost:${PORT}`);
-  console.log(`Contract address: ${CONTRACT_ADDRESS}`);
-  console.log(`Issuer (account #0): ${signer.address}\n`);
+  console.log(`CertChain backend listening on http://localhost:${PORT}`);
 });

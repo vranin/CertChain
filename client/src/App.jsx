@@ -1,22 +1,14 @@
-import { Routes, Route } from "react-router-dom";
-import Navbar from "./components/Navbar";
-import Footer from "./components/Footer";
-import Landing from "./pages/Landing";
+import React from "react";
+import { Routes, Route, Link } from "react-router-dom";
 import Issue from "./pages/Issue";
 import Verify from "./pages/Verify";
+import Admin from "./pages/Admin";
+import Activity from "./pages/Activity";
+// ... existing imports
 
-export default function App() {
-  return (
-    <div className="min-h-screen flex flex-col bg-slate-950">
-      <Navbar />
-      <main className="flex-1">
-        <Routes>
-          <Route path="/" element={<Landing />} />
-          <Route path="/issue" element={<Issue />} />
-          <Route path="/verify" element={<Verify />} />
-        </Routes>
-      </main>
-      <Footer />
-    </div>
-  );
-}
+<Routes>
+        {/* Your other existing routes here (e.g. /, /issue, /verify) */}
+        <Route path="/admin" element={<Admin />} />
+        <Route path="/activity" element={<Activity />} />
+      </Routes>
+      export default App;
