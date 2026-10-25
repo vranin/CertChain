@@ -293,7 +293,96 @@ app.post("/api/revoke", async (req, res) => {
   }
 });
 
-// Verification Route
+// Verification Routes
+function findCertMetadata(certIdOrHash) {
+  try {
+    const raw = fs.readFileSync(LOGS_FILE, "utf8");
+    const logs = JSON.parse(raw || "[]");
+    const match = logs.find(
+      (l) =>
+        l.action === "CERTIFICATE_ISSUED" &&
+        (l.certId === certIdOrHash || l.docHash === certIdOrHash)
+    );
+    return match
+      ? { studentName: match.recipientName, course: match.courseName }
+      : { studentName: "Verified Graduate", course: "Certified Course" };
+  } catch (e) {
+    return { studentName: "Verified Graduate", course: "Certified Course" };
+  }
+}
+
+app.post("/api/verify-file", upload.any(), async (req, res) => {
+  try {
+    const uploadedFile = req.files?.[0] || req.file;
+    if (!uploadedFile) {
+      return res.status(400).json({ error: "Certificate PDF file is required" });
+    }
+    if (!registryContract) {
+      return res.status(503).json({ error: "Blockchain contract not connected." });
+    }
+
+    const docHashBytes = crypto.createHash("sha256").update(Buffer.from(uploadedFile.buffer)).digest();
+    const docHash = ethers.hexlify(docHashBytes);
+
+    const result = await registryContract.verifyByHash(docHash);
+    const [exists, certId, issuer, issuerName, issuedAt, expiresAt, isRevoked, isExpired] = result;
+
+    const meta = findCertMetadata(certId || docHash);
+
+    return res.json({
+      success: true,
+      exists,
+      certId,
+      docHash,
+      hash: docHash,
+      issuer,
+      issuerName,
+      studentName: meta.studentName,
+      course: meta.course,
+      issuedAt: Number(issuedAt) * 1000,
+      expiresAt: Number(expiresAt) * 1000,
+      revoked: isRevoked,
+      isExpired,
+    });
+  } catch (err) {
+    console.error("Verify file failed:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+app.get("/api/verify-id/:certId", async (req, res) => {
+  try {
+    const { certId } = req.params;
+    if (!registryContract) {
+      return res.status(503).json({ error: "Blockchain contract not connected." });
+    }
+
+    const result = await registryContract.verifyById(certId);
+    const [exists, docHash, issuer, issuerName, issuedAt, expiresAt, isRevoked, isExpired] = result;
+
+    const meta = findCertMetadata(certId);
+
+    return res.json({
+      success: true,
+      exists,
+      certId,
+      docHash,
+      hash: docHash,
+      issuer,
+      issuerName,
+      studentName: meta.studentName,
+      course: meta.course,
+      issuedAt: Number(issuedAt) * 1000,
+      expiresAt: Number(expiresAt) * 1000,
+      revoked: isRevoked,
+      isExpired,
+    });
+  } catch (err) {
+    console.error("Verify ID failed:", err);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 app.get("/api/verify/:certId", async (req, res) => {
   try {
     const { certId } = req.params;
@@ -304,15 +393,21 @@ app.get("/api/verify/:certId", async (req, res) => {
     const result = await registryContract.verifyById(certId);
     const [exists, docHash, issuer, issuerName, issuedAt, expiresAt, isRevoked, isExpired] = result;
 
+    const meta = findCertMetadata(certId);
+
     return res.json({
       success: true,
       exists,
+      certId,
       docHash,
+      hash: docHash,
       issuer,
       issuerName,
-      issuedAt: Number(issuedAt),
-      expiresAt: Number(expiresAt),
-      isRevoked,
+      studentName: meta.studentName,
+      course: meta.course,
+      issuedAt: Number(issuedAt) * 1000,
+      expiresAt: Number(expiresAt) * 1000,
+      revoked: isRevoked,
       isExpired,
     });
   } catch (err) {
