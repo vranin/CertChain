@@ -17,6 +17,10 @@ export default function Issue() {
     getConnectedWallet().then((res) => {
       if (res) setWallet(res);
     });
+    // Auto-generate a default cert ID on load
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    const year = new Date().getFullYear();
+    setCertId(`CERT-${year}-${randomNum}`);
   }, []);
 
   const handleConnectWallet = async () => {
@@ -26,6 +30,12 @@ export default function Issue() {
     } catch (err) {
       alert(err.message);
     }
+  };
+
+  const generateCertId = () => {
+    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    const year = new Date().getFullYear();
+    setCertId(`CERT-${year}-${randomNum}`);
   };
 
   const downloadBase64Pdf = (base64Data, filename) => {
@@ -133,9 +143,18 @@ export default function Issue() {
 
       <form onSubmit={handleIssue} className="space-y-4">
         <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">
-            Certificate ID *
-          </label>
+          <div className="flex items-center justify-between mb-1">
+            <label className="block text-sm font-medium text-gray-700">
+              Certificate ID *
+            </label>
+            <button
+              type="button"
+              onClick={generateCertId}
+              className="text-xs text-blue-600 hover:text-blue-800 font-medium underline"
+            >
+              Auto-Generate ID
+            </button>
+          </div>
           <input
             type="text"
             required
