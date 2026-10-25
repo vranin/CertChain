@@ -17,10 +17,10 @@ export default function Issue() {
     getConnectedWallet().then((res) => {
       if (res) setWallet(res);
     });
-    // Auto-generate a default cert ID on load
-    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    // Auto-generate a default cert ID on load: CERT - Year - 10 digit number
+    const tenDigitNum = Math.floor(1000000000 + Math.random() * 9000000000);
     const year = new Date().getFullYear();
-    setCertId(`CERT-${year}-${randomNum}`);
+    setCertId(`CERT-${year}-${tenDigitNum}`);
   }, []);
 
   const handleConnectWallet = async () => {
@@ -33,9 +33,9 @@ export default function Issue() {
   };
 
   const generateCertId = () => {
-    const randomNum = Math.floor(1000 + Math.random() * 9000);
+    const tenDigitNum = Math.floor(1000000000 + Math.random() * 9000000000);
     const year = new Date().getFullYear();
-    setCertId(`CERT-${year}-${randomNum}`);
+    setCertId(`CERT-${year}-${tenDigitNum}`);
   };
 
   const downloadBase64Pdf = (base64Data, filename) => {
