@@ -142,7 +142,7 @@ export default function Issue() {
             placeholder="e.g. CERT-2026-001"
             value={certId}
             onChange={(e) => setCertId(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
@@ -156,7 +156,7 @@ export default function Issue() {
               placeholder="e.g. Jane Doe"
               value={recipientName}
               onChange={(e) => setRecipientName(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
           <div>
@@ -168,7 +168,7 @@ export default function Issue() {
               placeholder="e.g. Blockchain Development"
               value={courseName}
               onChange={(e) => setCourseName(e.target.value)}
-              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
             />
           </div>
         </div>
@@ -181,7 +181,7 @@ export default function Issue() {
             type="date"
             value={expiresAt}
             onChange={(e) => setExpiresAt(e.target.value)}
-            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+            className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm text-gray-900 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
           />
         </div>
 
@@ -194,7 +194,7 @@ export default function Issue() {
             accept="application/pdf"
             required
             onChange={(e) => setFile(e.target.files?.[0] || null)}
-            className="w-full text-sm text-gray-500 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+            className="w-full text-sm text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-lg file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 bg-white p-1 border border-gray-300 rounded-lg"
           />
         </div>
 
