@@ -1,4 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
+import { getConnectedWallet, connectWallet } from "../utils/wallet";
+import { Wallet, ShieldCheck } from "lucide-react";
 
 export default function Issue() {
   const [certId, setCertId] = useState("");
@@ -9,6 +11,22 @@ export default function Issue() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [wallet, setWallet] = useState(null);
+
+  useEffect(() => {
+    getConnectedWallet().then((res) => {
+      if (res) setWallet(res);
+    });
+  }, []);
+
+  const handleConnectWallet = async () => {
+    try {
+      const res = await connectWallet();
+      setWallet(res);
+    } catch (err) {
+      alert(err.message);
+    }
+  };
 
   const downloadBase64Pdf = (base64Data, filename) => {
     try {
@@ -76,9 +94,24 @@ export default function Issue() {
 
   return (
     <div className="max-w-2xl mx-auto p-6 bg-white border border-gray-200 rounded-xl shadow-sm my-8">
-      <h1 className="text-2xl font-bold text-gray-900 mb-2">Issue New Certificate</h1>
+      <div className="flex items-center justify-between mb-2">
+        <h1 className="text-2xl font-bold text-gray-900">Issue New Certificate</h1>
+        {wallet ? (
+          <div className="flex items-center gap-1.5 px-3 py-1 bg-emerald-50 text-emerald-700 text-xs font-medium rounded-full border border-emerald-200">
+            <ShieldCheck size={14} />
+            Wallet: {wallet.address.slice(0, 6)}...{wallet.address.slice(-4)} (Free Local Testnet)
+          </div>
+        ) : (
+          <button
+            onClick={handleConnectWallet}
+            className="flex items-center gap-1.5 px-3 py-1 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-medium rounded-full border border-blue-200 transition"
+          >
+            <Wallet size={14} /> Connect Wallet
+          </button>
+        )}
+      </div>
       <p className="text-sm text-gray-500 mb-6">
-        Upload a certificate PDF. It will receive a QR verification stamp and be registered on-chain.
+        Upload a certificate PDF. It will receive a QR verification stamp and be registered on-chain (100% free local Hardhat network).
       </p>
 
       {error && (

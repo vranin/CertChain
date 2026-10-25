@@ -53,8 +53,21 @@ function logActivity(action, details = {}) {
 // 2. Blockchain / Contract Setup (Ethers v6)
 // ---------------------------------------------------------------------------
 const RPC_URL = process.env.RPC_URL || "http://127.0.0.1:8545";
-const PRIVATE_KEY = process.env.PRIVATE_KEY;
-const CONTRACT_ADDRESS = process.env.CONTRACT_ADDRESS;
+const DEFAULT_HARDHAT_PK = "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80";
+const PRIVATE_KEY = process.env.PRIVATE_KEY || DEFAULT_HARDHAT_PK;
+
+let contractAddressEnv = process.env.CONTRACT_ADDRESS;
+try {
+  const contractConfigPath = path.resolve("config/contract.json");
+  if (!contractAddressEnv && fs.existsSync(contractConfigPath)) {
+    const configData = JSON.parse(fs.readFileSync(contractConfigPath, "utf8"));
+    contractAddressEnv = configData.address;
+  }
+} catch (e) {
+  // ignore
+}
+
+const CONTRACT_ADDRESS = contractAddressEnv;
 
 let registryContract = null;
 let provider = null;

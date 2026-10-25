@@ -1,14 +1,16 @@
 import { Link, NavLink } from "react-router-dom";
-import { Shield, Moon, Sun, Menu, X } from "lucide-react";
+import { Shield, Moon, Sun, Menu, X, Wallet } from "lucide-react";
 import { useState, useEffect } from "react";
+import { connectWallet, getConnectedWallet } from "../utils/wallet";
 
 export default function Navbar() {
   const [dark, setDark] = useState(true);
   const [menuOpen, setMenuOpen] = useState(false);
   const [scrolled, setScrolled] = useState(false);
+  const [walletAddress, setWalletAddress] = useState(null);
+  const [connecting, setConnecting] = useState(false);
 
   useEffect(() => {
-    // Apply dark class to html element
     document.documentElement.classList.toggle("dark", dark);
   }, [dark]);
 
@@ -18,10 +20,38 @@ export default function Navbar() {
     return () => window.removeEventListener("scroll", handler);
   }, []);
 
+  useEffect(() => {
+    getConnectedWallet().then((res) => {
+      if (res && res.address) {
+        setWalletAddress(res.address);
+      }
+    });
+
+    if (window.ethereum) {
+      window.ethereum.on("accountsChanged", (accounts) => {
+        setWalletAddress(accounts[0] || null);
+      });
+    }
+  }, []);
+
+  const handleConnect = async () => {
+    try {
+      setConnecting(true);
+      const res = await connectWallet();
+      setWalletAddress(res.address);
+    } catch (err) {
+      alert(err.message || "Failed to connect wallet");
+    } finally {
+      setConnecting(false);
+    }
+  };
+
   const navLinkClass = ({ isActive }) =>
     `text-sm font-medium transition-colors duration-200 ${
       isActive ? "text-emerald-400" : "text-slate-400 hover:text-white"
     }`;
+
+  const truncate = (addr) => addr ? `${addr.slice(0, 6)}...${addr.slice(-4)}` : "";
 
   return (
     <nav
@@ -63,6 +93,16 @@ export default function Navbar() {
             className="p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
           >
             {dark ? <Sun size={18} /> : <Moon size={18} />}
+          </button>
+
+          <button
+            onClick={walletAddress ? undefined : handleConnect}
+            disabled={connecting}
+            className="flex items-center gap-1.5 py-1.5 px-3 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-400 border border-slate-700 text-xs font-medium transition"
+            title={walletAddress ? `Connected: ${walletAddress}` : "Connect MetaMask Wallet (Free Local Testnet)"}
+          >
+            <Wallet size={14} />
+            {walletAddress ? truncate(walletAddress) : connecting ? "Connecting..." : "Connect Wallet"}
           </button>
 
           <Link to="/issue" className="hidden md:block btn-primary py-2 px-4 text-xs">
